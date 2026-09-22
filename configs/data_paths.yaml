@@ -1,0 +1,12 @@
+active_profile: "proxy"
+
+profiles:
+  proxy:
+    root_dir: "data"
+    metadata_csv: null             
+    roi_annotation_csv: null      
+
+  clinical_v1:
+    root_dir: "data/clinical_v1"
+    metadata_csv: "data/clinical_v1/metadata.csv"    
+    roi_annotation_csv: "data/clinical_v1/roi.csv"    

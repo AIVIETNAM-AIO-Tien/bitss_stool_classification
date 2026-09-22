@@ -1,0 +1,62 @@
+seed: 42
+
+data:
+  root_dir: "data"                
+  num_classes: 7                  
+  class_names: ["Type_1", "Type_2", "Type_3", "Type_4", "Type_5", "Type_6", "Type_7"]
+  image_size: 224              
+  batch_size: 32
+  num_workers: 2                  
+
+  # split_mode:
+  #   "image_level"          
+  #   "pseudo_patient_level"
+  #   "patient_level"         
+  split_mode: "image_level"
+
+  pseudo_patient:
+    images_per_pseudo_patient: 4   
+    random_seed: 42
+
+  
+  patient_metadata_csv: null       
+
+augmentation:
+  train:
+    horizontal_flip: true
+    rotation_degrees: 10
+    color_jitter_brightness: 0.15
+    color_jitter_contrast: 0.15
+  eval:
+    enabled: false
+
+model:
+  backbone: "mobilenet_v2"          # mobilenet_v2 | resnet18 | efficientnet_b0
+  pretrained: true
+  freeze_backbone: true             
+  unfreeze_last_n_blocks: 2        
+  dropout: 0.3
+
+train:
+  epochs: 20
+  lr: 0.0003
+  weight_decay: 0.0001
+  optimizer: "adamw"
+  scheduler: "cosine"             
+  early_stopping_metric: "val_kappa"  # ưu tiên Kappa/F1-macro hơn accuracy
+  early_stopping_patience: 5
+  checkpoint_dir: "outputs/checkpoints"
+  log_dir: "outputs/logs"
+  save_every_n_epochs: 1            
+
+evaluate:
+  checkpoint: "outputs/checkpoints/best.pt"
+  report_dir: "outputs/figures"
+
+xai:
+  methods: ["gradcam"]             
+  num_samples_per_class: 3          
+  target_layer: "auto"              # "auto" -> models.py tự chọn layer cuối phù hợp backbone
+  output_dir: "outputs/figures/xai"
+
+  roi_annotation_csv: null         
