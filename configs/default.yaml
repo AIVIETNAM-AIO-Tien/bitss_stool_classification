@@ -7,11 +7,7 @@ data:
   image_size: 224              
   batch_size: 32
   num_workers: 2                  
-
-  # split_mode:
-  #   "image_level"          
-  #   "pseudo_patient_level"
-  #   "patient_level"         
+    
   split_mode: "image_level"
 
   pseudo_patient:
@@ -31,7 +27,7 @@ augmentation:
     enabled: false
 
 model:
-  backbone: "mobilenet_v2"          # mobilenet_v2 | resnet18 | efficientnet_b0
+  backbone: "mobilenet_v2"          
   pretrained: true
   freeze_backbone: true             
   unfreeze_last_n_blocks: 2        
@@ -43,7 +39,7 @@ train:
   weight_decay: 0.0001
   optimizer: "adamw"
   scheduler: "cosine"             
-  early_stopping_metric: "val_kappa"  # ưu tiên Kappa/F1-macro hơn accuracy
+  early_stopping_metric: "val_kappa"  
   early_stopping_patience: 5
   checkpoint_dir: "outputs/checkpoints"
   log_dir: "outputs/logs"
@@ -56,7 +52,7 @@ evaluate:
 xai:
   methods: ["gradcam"]             
   num_samples_per_class: 3          
-  target_layer: "auto"              # "auto" -> models.py tự chọn layer cuối phù hợp backbone
+  target_layer: "auto"             
   output_dir: "outputs/figures/xai"
 
   roi_annotation_csv: null         
