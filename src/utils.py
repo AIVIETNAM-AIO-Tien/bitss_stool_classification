@@ -82,7 +82,7 @@ def load_checkpoint(path: str, map_location=None) -> dict:
             f"Không tìm thấy checkpoint tại {path}. "
             "Đã chạy src/train.py trước đó chưa?"
         )
-    return torch.load(path, map_location=map_location)
+    return torch.load(path, map_location=map_location,weights_only=False)
 
 
 def get_device() -> torch.device:
