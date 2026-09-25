@@ -9,6 +9,7 @@ Lưu checkpoint thường xuyên (save_every_n_epochs) để giảm rủi ro m�
 khi Colab free tier ngắt session giữa chừng (đã nêu trong kế hoạch Giai đoạn 3).
 """
 import argparse
+import csv
 import os
 import time
 
@@ -28,6 +29,14 @@ def parse_args():
     parser.add_argument("--split_mode", type=str, default=None,
                          choices=["image_level", "pseudo_patient_level", "patient_level"],
                          help="Ghi đè data.split_mode trong config nếu truyền vào")
+    parser.add_argument("--backbone", type=str, default=None,
+                         choices=["mobilenet_v2", "resnet18", "efficientnet_b0"],
+                         help="Ghi đè model.backbone — dùng để so sánh backbone (mục 5.1.1) "
+                              "mà không cần sửa file config mỗi lần")
+    parser.add_argument("--checkpoint_dir", type=str, default=None,
+                         help="Ghi đè train.checkpoint_dir — dùng kèm --backbone để tránh "
+                              "các lần train ghi đè checkpoint của nhau, "
+                              "ví dụ: --checkpoint_dir outputs/checkpoints/backbone_resnet18")
     return parser.parse_args()
 
 
@@ -71,6 +80,10 @@ def main():
     cfg = load_config(args.config)
     if args.split_mode:
         cfg["data"]["split_mode"] = args.split_mode
+    if args.backbone:
+        cfg["model"]["backbone"] = args.backbone
+    if args.checkpoint_dir:
+        cfg["train"]["checkpoint_dir"] = args.checkpoint_dir
 
     set_seed(cfg.get("seed", 42))
     logger = get_logger("train", cfg["train"]["log_dir"])
@@ -107,6 +120,19 @@ def main():
     epochs_no_improve = 0
     early_stop_key = cfg["train"]["early_stopping_metric"].replace("val_", "")
 
+    # CSV history — nguồn dữ liệu ĐÁNG TIN CẬY để vẽ đường cong huấn luyện
+    # (mục 5.2.4 báo cáo), thay vì parse text log dễ vỡ khi đổi định dạng log.
+    history_path = os.path.join(
+        cfg["train"]["log_dir"],
+        f"history_{cfg['model']['backbone']}_{cfg['data']['split_mode']}.csv",
+    )
+    os.makedirs(cfg["train"]["log_dir"], exist_ok=True)
+    history_fields = ["epoch", "train_loss", "train_accuracy", "train_f1_macro", "train_kappa",
+                       "val_loss", "val_accuracy", "val_f1_macro", "val_kappa", "elapsed_sec"]
+    with open(history_path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerow(history_fields)
+    logger.info(f"Training history sẽ được ghi vào {history_path} (dùng cho plot_training_curves.py)")
+
     for epoch in range(1, cfg["train"]["epochs"] + 1):
         t0 = time.time()
         train_metrics = run_epoch(model, dataloaders["train"], criterion, optimizer, device, train=True)
@@ -121,6 +147,16 @@ def main():
             f"val_loss={val_metrics['loss']:.4f} val_acc={val_metrics['accuracy']:.4f} "
             f"val_f1_macro={val_metrics['f1_macro']:.4f} val_kappa={val_metrics['kappa']:.4f}"
         )
+
+        with open(history_path, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow([
+                epoch,
+                train_metrics["loss"], train_metrics["accuracy"],
+                train_metrics["f1_macro"], train_metrics["kappa"],
+                val_metrics["loss"], val_metrics["accuracy"],
+                val_metrics["f1_macro"], val_metrics["kappa"],
+                round(elapsed, 1),
+            ])
 
         current_metric = val_metrics[early_stop_key]
         is_best = current_metric > best_metric

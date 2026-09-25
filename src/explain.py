@@ -11,9 +11,11 @@ Ví dụ chạy:
         --checkpoint outputs/checkpoints/best.pt --method gradcam --num_samples 8
 """
 import argparse
+import json
 import os
 import random
 
+import pandas as pd
 import torch
 import numpy as np
 from PIL import Image
@@ -21,6 +23,10 @@ import matplotlib.pyplot as plt
 
 from dataset import build_dataloaders, IMAGENET_MEAN, IMAGENET_STD
 from models import build_model, get_target_layer_for_gradcam
+from metrics_xai import (
+    heatmap_to_binary_mask, roi_box_to_mask, compute_iou,
+    pointing_game_hit, average_drop_increase,
+)
 from utils import load_config, load_checkpoint, get_device, get_logger
 
 
@@ -31,6 +37,9 @@ def parse_args():
     parser.add_argument("--method", type=str, default="gradcam", choices=["gradcam", "lime"])
     parser.add_argument("--num_samples", type=int, default=None,
                          help="Tổng số ảnh minh họa; mặc định lấy theo config xai.num_samples_per_class * num_classes")
+    parser.add_argument("--output_dir", type=str, default=None,
+                         help="Ghi đè xai.output_dir — hữu ích khi so sánh Grad-CAM giữa "
+                              "nhiều setup (Setup A vs B), tránh ghi đè kết quả lẫn nhau")
     return parser.parse_args()
 
 
@@ -44,6 +53,10 @@ def denormalize(tensor_img: torch.Tensor) -> np.ndarray:
 
 
 def run_gradcam(model, target_layer, dataloader, class_names, device, num_samples, output_dir, logger):
+    """Sinh Grad-CAM cho num_samples ảnh ngẫu nhiên, lưu ảnh minh họa, và trả về
+    danh sách record {image_path, label, grayscale_cam} để hàm gọi tiếp (đánh giá
+    định lượng nếu có ROI, hoặc error_analysis) tái sử dụng mà không phải chạy CAM 2 lần.
+    """
     try:
         from pytorch_grad_cam import GradCAM
         from pytorch_grad_cam.utils.image import show_cam_on_image
@@ -56,12 +69,12 @@ def run_gradcam(model, target_layer, dataloader, class_names, device, num_sample
     cam = GradCAM(model=model, target_layers=[target_layer])
     os.makedirs(output_dir, exist_ok=True)
 
-    # Lấy ngẫu nhiên num_samples ảnh từ tập test để minh họa
     dataset = dataloader.dataset
     indices = list(range(len(dataset)))
     random.shuffle(indices)
     indices = indices[:num_samples]
 
+    records = []
     for i, idx in enumerate(indices):
         image_tensor, label, image_path = dataset[idx]
         input_tensor = image_tensor.unsqueeze(0).to(device)
@@ -83,12 +96,91 @@ def run_gradcam(model, target_layer, dataloader, class_names, device, num_sample
         plt.savefig(save_path, dpi=150)
         plt.close()
 
+        records.append({
+            "image_path": image_path,
+            "label": label,
+            "grayscale_cam": grayscale_cam,
+            "input_tensor": input_tensor,
+        })
+
     logger.info(f"Đã lưu {len(indices)} ảnh Grad-CAM vào {output_dir}/")
     logger.warning(
-        "Đây là minh họa ĐỊNH TÍNH (proof-of-concept) trên dữ liệu tạm — chưa có "
-        "ROI annotation thật để đánh giá ĐỊNH LƯỢNG (IoU/Pointing Game). "
-        "Xem src/metrics_xai.py — sẽ dùng được ngay khi có roi_annotation_csv thật."
+        "Minh họa ĐỊNH TÍNH (proof-of-concept) trên dữ liệu tạm — nếu chưa cấu hình "
+        "xai.roi_annotation_csv, phần đánh giá ĐỊNH LƯỢNG (IoU/Pointing Game) sẽ bị bỏ qua. "
+        "Xem docs/data_contract.md để biết cách cấu hình khi có ROI thật."
     )
+    return records
+
+
+def run_quantitative_xai_eval(model, records, roi_csv_path, device, output_dir, logger):
+    """Đánh giá ĐỊNH LƯỢNG Grad-CAM bằng metrics_xai.py — CHỈ chạy được khi có
+    roi_annotation_csv (dữ liệu thật). Trên proxy data hàm này được gọi nhưng sẽ
+    tự bỏ qua và log lý do, đúng tinh thần 'để trống + nêu rõ điều kiện' của báo cáo.
+    """
+    if not roi_csv_path or not os.path.exists(roi_csv_path):
+        logger.warning(
+            "Bỏ qua đánh giá định lượng XAI (IoU/Pointing Game/Average Drop): "
+            "chưa có xai.roi_annotation_csv hợp lệ trong config. "
+            "Đây là điều kiện dữ liệu thật theo docs/data_contract.md, "
+            "hiện KHÔNG đáp ứng được trên dataset proxy — mục 5.3.4/2.6 báo cáo."
+        )
+        return None
+
+    roi_df = pd.read_csv(roi_csv_path)
+    roi_lookup = {row["image_path"]: row for _, row in roi_df.iterrows()}
+
+    rows = []
+    for rec in records:
+        roi_row = roi_lookup.get(rec["image_path"])
+        if roi_row is None:
+            continue  # ảnh này chưa có ROI annotation, bỏ qua khi tính trung bình
+
+        h, w = rec["grayscale_cam"].shape
+        roi_mask = roi_box_to_mask(
+            int(roi_row["x_min"]), int(roi_row["y_min"]),
+            int(roi_row["x_max"]), int(roi_row["y_max"]), h, w,
+        )
+        saliency_mask = heatmap_to_binary_mask(rec["grayscale_cam"], threshold=0.5)
+
+        iou = compute_iou(saliency_mask, roi_mask)
+        hit = pointing_game_hit(rec["grayscale_cam"], roi_mask)
+        drop_info = average_drop_increase(
+            model, rec["input_tensor"], rec["grayscale_cam"],
+            target_class=rec["label"], threshold=0.5, device=device,
+        )
+
+        rows.append({
+            "image_path": rec["image_path"], "label": rec["label"],
+            "iou": iou, "pointing_game_hit": hit,
+            "confidence_drop_pct": drop_info["drop_pct"],
+            "confidence_increased_after_masking": drop_info["increased"],
+        })
+
+    if not rows:
+        logger.warning("roi_annotation_csv tồn tại nhưng không khớp ảnh nào trong mẫu Grad-CAM hiện tại.")
+        return None
+
+    df = pd.DataFrame(rows)
+    os.makedirs(output_dir, exist_ok=True)
+    df.to_csv(os.path.join(output_dir, "xai_quantitative_metrics.csv"), index=False)
+
+    summary = {
+        "n_images_evaluated": len(df),
+        "mean_iou": float(df["iou"].mean()),
+        "pointing_game_accuracy": float(df["pointing_game_hit"].mean()),
+        "mean_confidence_drop_pct": float(df["confidence_drop_pct"].mean()),
+        "pct_confidence_increased_after_masking": float(df["confidence_increased_after_masking"].mean()) * 100,
+    }
+    with open(os.path.join(output_dir, "xai_quantitative_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    logger.info(f"Đánh giá định lượng XAI (RQ2a) — {json.dumps(summary, indent=2, ensure_ascii=False)}")
+    logger.info(
+        "IoU/Pointing Game THẤP hoặc % confidence tăng sau khi che vùng saliency CAO "
+        "là bằng chứng ủng hộ giả thuyết shortcut learning (mô hình không thực sự "
+        "dựa vào vùng phân để ra quyết định) — dùng trực tiếp cho Chương 5.3.3/5.5 báo cáo."
+    )
+    return summary
 
 
 def run_lime(model, dataloader, class_names, device, num_samples, output_dir, logger):
@@ -161,12 +253,16 @@ def main():
 
     class_names = cfg["data"]["class_names"]
     num_samples = args.num_samples or (cfg["xai"]["num_samples_per_class"] * len(class_names))
-    output_dir = cfg["xai"]["output_dir"]
+    output_dir = args.output_dir or cfg["xai"]["output_dir"]
 
     if args.method == "gradcam":
         target_layer = get_target_layer_for_gradcam(model, cfg["model"]["backbone"])
-        run_gradcam(model, target_layer, dataloaders["test"], class_names, device,
-                    num_samples, output_dir, logger)
+        records = run_gradcam(model, target_layer, dataloaders["test"], class_names, device,
+                               num_samples, output_dir, logger)
+        run_quantitative_xai_eval(
+            model, records, cfg["xai"].get("roi_annotation_csv"),
+            device, output_dir, logger,
+        )
     elif args.method == "lime":
         run_lime(model, dataloaders["test"], class_names, device, num_samples, output_dir, logger)
 

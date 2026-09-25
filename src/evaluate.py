@@ -27,6 +27,10 @@ def parse_args():
     parser.add_argument("--config", type=str, default="configs/default.yaml")
     parser.add_argument("--checkpoint", type=str, default=None,
                          help="Mặc định lấy từ evaluate.checkpoint trong config")
+    parser.add_argument("--report_dir", type=str, default=None,
+                         help="Ghi đè evaluate.report_dir — hữu ích khi so sánh nhiều "
+                              "backbone/split_mode mà không muốn ghi đè kết quả lẫn nhau, "
+                              "ví dụ: --report_dir outputs/figures/backbone_resnet18")
     return parser.parse_args()
 
 
@@ -67,6 +71,9 @@ def main():
     ckpt = load_checkpoint(checkpoint_path, map_location=device)
     logger.info(f"Đã nạp checkpoint từ epoch {ckpt['epoch']} ({checkpoint_path})")
 
+    if args.report_dir:
+        cfg["evaluate"]["report_dir"] = args.report_dir
+
     dataloaders = build_dataloaders(cfg)
     model = build_model(cfg["model"], cfg["data"]["num_classes"]).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -79,6 +86,7 @@ def main():
         "f1_macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
         "kappa_quadratic": cohen_kappa_score(y_true, y_pred, weights="quadratic"),
         "split_mode": cfg["data"]["split_mode"],
+        "backbone": cfg["model"]["backbone"],
         "data_profile": cfg.get("_active_data_profile", "unknown"),
     }
 
